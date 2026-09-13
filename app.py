@@ -6,7 +6,7 @@ import ta
 import plotly.graph_objects as go
 
 # ============================================================
-# SMART MARKET PULSE V2
+# SOVENDRA MARKET AI V3
 # Upgraded from the original Market Pulse Dashboard:
 # - Cached market data
 # - Data freshness display
@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 # ============================================================
 
 st.set_page_config(
-    page_title="Smart Market Pulse V2",
+    page_title="Sovendra Market AI",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -49,6 +49,11 @@ QUICK_SYMBOLS = {
     "SBIN": "SBIN.NS",
     "TATA POWER": "TATAPOWER.NS",
     "ITC": "ITC.NS",
+}
+
+INDEX_SYMBOLS = {
+    "^NSEI", "^NSEBANK", "^BSESN", "^INDIAVIX",
+    "^GSPC", "^IXIC", "^DJI"
 }
 
 TIMEFRAMES = {
@@ -186,7 +191,9 @@ def add_indicators(df: pd.DataFrame, intraday: bool = False) -> pd.DataFrame:
 
     typical = (out["High"] + out["Low"] + out["Close"]) / 3
 
-    if intraday and out["Volume"].fillna(0).sum() > 0:
+    if out["Volume"].fillna(0).sum() <= 0:
+        out["VWAP"] = np.nan
+    elif intraday:
         try:
             session_key = out.index.tz_convert("Asia/Kolkata").date
         except Exception:
@@ -195,12 +202,10 @@ def add_indicators(df: pd.DataFrame, intraday: bool = False) -> pd.DataFrame:
         pv = typical * out["Volume"]
         volume_cum = out["Volume"].groupby(session_key).cumsum()
         pv_cum = pv.groupby(session_key).cumsum()
-
         out["VWAP"] = pv_cum / volume_cum.replace(0, np.nan)
     else:
         rolling_volume = out["Volume"].rolling(20).sum()
         rolling_pv = (typical * out["Volume"]).rolling(20).sum()
-
         out["VWAP"] = rolling_pv / rolling_volume.replace(0, np.nan)
 
     return out
@@ -452,7 +457,7 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
     vwap = (
         float(latest["VWAP"])
         if pd.notna(latest["VWAP"])
-        else price
+        else np.nan
     )
 
     volume = float(latest["Volume"])
@@ -488,13 +493,16 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
         score -= 1
         reasons.append("Price below EMA200")
 
-    # VWAP
-    if price > vwap:
-        score += 1
-        reasons.append("Price above VWAP")
+    # VWAP: score only when the data feed provides usable volume.
+    if np.isfinite(vwap):
+        if price > vwap:
+            score += 1
+            reasons.append("Price above VWAP")
+        else:
+            score -= 1
+            reasons.append("Price below VWAP")
     else:
-        score -= 1
-        reasons.append("Price below VWAP")
+        reasons.append("VWAP unavailable for this data feed")
 
     # RSI
     # Oversold is NOT treated as an automatic short.
@@ -532,7 +540,7 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
         )
 
     # Volume
-    if vol_ma > 0 and volume > 1.2 * vol_ma:
+    if pd.notna(vol_ma) and vol_ma > 0 and volume > 1.2 * vol_ma:
         candle_bullish = (
             float(latest["Close"]) >= float(latest["Open"])
         )
@@ -544,7 +552,11 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
 
         reasons.append("Volume above 20-period average")
     else:
-        reasons.append("Volume confirmation weak")
+        reasons.append(
+            "Volume unavailable for this index/data feed"
+            if volume == 0
+            else "Volume confirmation weak"
+        )
 
     # SMC
     if (
@@ -587,7 +599,7 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
     confirmation_reasons = []
 
     if signal == "BULLISH":
-        if price <= vwap:
+        if np.isfinite(vwap) and price <= vwap:
             confirmation = False
             confirmation_reasons.append(
                 "Price is below VWAP"
@@ -600,7 +612,7 @@ def generate_signal(df: pd.DataFrame, smc: dict, mood_label: str):
             )
 
     elif signal == "BEARISH":
-        if price >= vwap:
+        if np.isfinite(vwap) and price >= vwap:
             confirmation = False
             confirmation_reasons.append(
                 "Price is above VWAP"
@@ -707,9 +719,8 @@ def trade_setup(df: pd.DataFrame, signal: str):
 # ============================================================
 # CHART
 # ============================================================
-def make_chart(df: pd.DataFrame, smc: dict):
+def make_chart(df: pd.DataFrame, smc: dict, setup: dict, signal: str):
     chart_df = df.tail(150).copy()
-
     fig = go.Figure()
 
     fig.add_trace(
@@ -729,7 +740,7 @@ def make_chart(df: pd.DataFrame, smc: dict):
         ("EMA200", "EMA 200"),
         ("VWAP", "VWAP"),
     ]:
-        if column in chart_df.columns:
+        if column in chart_df.columns and chart_df[column].notna().any():
             fig.add_trace(
                 go.Scatter(
                     x=chart_df.index,
@@ -739,27 +750,48 @@ def make_chart(df: pd.DataFrame, smc: dict):
                 )
             )
 
+    for level, label in [
+        (setup["support"], "Support"),
+        (setup["resistance"], "Resistance"),
+        (setup["sl"], "Stop Loss"),
+        (setup["target1"], "Target 1"),
+        (setup["target2"], "Target 2"),
+    ]:
+        if np.isfinite(level):
+            fig.add_hline(
+                y=level,
+                line_dash="dot",
+                annotation_text=label,
+            )
+
+    if signal != "NEUTRAL":
+        fig.add_hrect(
+            y0=setup["entry_low"],
+            y1=setup["entry_high"],
+            line_width=0,
+            annotation_text="Entry Zone",
+        )
+
     if np.isfinite(smc["last_swing_high"]):
         fig.add_hline(
             y=smc["last_swing_high"],
-            line_dash="dot",
+            line_dash="dash",
             annotation_text="Swing High",
         )
 
     if np.isfinite(smc["last_swing_low"]):
         fig.add_hline(
             y=smc["last_swing_low"],
-            line_dash="dot",
+            line_dash="dash",
             annotation_text="Swing Low",
         )
 
     fig.update_layout(
-        height=600,
+        height=620,
         xaxis_rangeslider_visible=False,
         margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h"),
     )
-
     return fig
 
 
@@ -807,7 +839,7 @@ with st.sidebar:
 # ============================================================
 # HEADER
 # ============================================================
-st.title("📊 Smart Market Pulse V2")
+st.title("📊 Sovendra Market AI")
 
 st.caption(
     "Technical + market mood + basic SMC decision-support. "
@@ -933,11 +965,29 @@ latest = analysis_df.iloc[-1]
 # ============================================================
 latest_timestamp = raw_df.index[-1]
 
+try:
+    now_ist = pd.Timestamp.now(tz="Asia/Kolkata")
+    latest_ist = (
+        latest_timestamp.tz_convert("Asia/Kolkata")
+        if getattr(latest_timestamp, "tzinfo", None) is not None
+        else latest_timestamp.tz_localize("Asia/Kolkata")
+    )
+    age_minutes = max(
+        0,
+        int((now_ist - latest_ist).total_seconds() / 60)
+    )
+except Exception:
+    age_minutes = 0
+
 st.info(
-    f"📡 **Latest available candle:** "
-    f"{format_timestamp(latest_timestamp)}  |  "
-    f"**Timeframe:** {timeframe}  |  "
-    f"**Ticker:** {symbol}"
+    f"📡 **Latest available candle:** {format_timestamp(latest_timestamp)}  | "
+    f"**Timeframe:** {timeframe}  | **Ticker:** {symbol}  | "
+    f"**Data age:** ~{age_minutes} min"
+)
+
+st.caption(
+    "⚠️ Data source: Yahoo Finance/yfinance. NSE quotes in this feed are delayed; "
+    "use your broker/exchange feed to verify the live price before placing an order."
 )
 
 # ============================================================
@@ -997,7 +1047,9 @@ m8.metric(
 
 m9.metric(
     "Volume",
-    f"{float(latest['Volume']):,.0f}",
+    f"{float(latest['Volume']):,.0f}"
+    if float(latest["Volume"]) > 0
+    else "N/A",
 )
 
 # ============================================================
@@ -1054,6 +1106,18 @@ with right:
         "Signal strength measures indicator agreement; "
         "it is not a probability of profit."
     )
+
+# ============================================================
+# SIGNAL BREAKDOWN
+# ============================================================
+with st.expander("🧠 Signal Breakdown"):
+    st.write(f"**Bias:** {signal}")
+    st.write(f"**Score:** {signal_result['score']}")
+    st.write(f"**SMC Structure:** {smc['structure']}")
+    st.write(f"**BOS:** {smc['bos']}")
+    st.write(f"**FVG:** {smc['fvg']}")
+    for reason in signal_result["reasons"]:
+        st.write(f"• {reason}")
 
 # ============================================================
 # TRADE DECISION
@@ -1166,6 +1230,8 @@ st.subheader("📈 Price Action Chart")
 fig = make_chart(
     analysis_df,
     smc,
+    setup,
+    signal,
 )
 
 st.plotly_chart(
