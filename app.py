@@ -967,22 +967,19 @@ latest_timestamp = raw_df.index[-1]
 
 try:
     now_ist = pd.Timestamp.now(tz="Asia/Kolkata")
-    latest_ist = (
-        latest_timestamp.tz_convert("Asia/Kolkata")
-        if getattr(latest_timestamp, "tzinfo", None) is not None
-        else latest_timestamp.tz_localize("Asia/Kolkata")
-    )
-    age_minutes = max(
-        0,
-        int((now_ist - latest_ist).total_seconds() / 60)
-    )
+    ts = pd.Timestamp(latest_timestamp)
+    if ts.tz is None:
+        ts = ts.tz_localize("Asia/Kolkata")
+    else:
+        ts = ts.tz_convert("Asia/Kolkata")
+    age_minutes = max(0, int((now_ist - ts).total_seconds() / 60))
 except Exception:
-    age_minutes = 0
+    age_minutes = None
 
 st.info(
     f"📡 **Latest available candle:** {format_timestamp(latest_timestamp)}  | "
     f"**Timeframe:** {timeframe}  | **Ticker:** {symbol}  | "
-    f"**Data age:** ~{age_minutes} min"
+    f"**Data age:** {(("~" + str(age_minutes) + " min") if age_minutes is not None else "N/A")}"
 )
 
 st.caption(
