@@ -1,5 +1,6 @@
 streamlit
-yfinance
 pandas
 numpy
 plotly
+ta
+growwapi>=1.5.0
